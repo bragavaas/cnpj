@@ -1,0 +1,74 @@
+name: cnpj-rfb
+
+networks:
+  cnpj-net:
+    name: cnpj-net
+
+volumes:
+  pgdata:
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-dados_rfb}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${DB_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-dados_rfb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cnpj-net
+
+  # Não roda com "docker compose up" (profile "etl"). Disparar sob demanda com:
+  #   docker compose run --rm etl
+  etl:
+    build:
+      context: .
+      dockerfile: code/Dockerfile
+    profiles: ["etl"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-dados_rfb}
+      OUTPUT_FILES_PATH: /data/output
+      EXTRACTED_FILES_PATH: /data/extracted
+      ETL_TEST_MODE: ${ETL_TEST_MODE:-true}
+      ETL_MAX_FILES_PER_TYPE: ${ETL_MAX_FILES_PER_TYPE:-1}
+      ETL_MAX_ROWS: ${ETL_MAX_ROWS:-5000}
+    volumes:
+      - ./data/output:/data/output
+      - ./data/extracted:/data/extracted
+    networks:
+      - cnpj-net
+
+  api:
+    build:
+      context: ./api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-dados_rfb}
+      PORT: 3000
+    ports:
+      - "${API_PORT:-3000}:3000"
+    networks:
+      - cnpj-net

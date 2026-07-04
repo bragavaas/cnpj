@@ -130,3 +130,8 @@ dmypy.json
 
 .idea/
 *.tmp
+
+# Docker / dados baixados pelo ETL / API Node
+/data/
+node_modules/
+api/dist/

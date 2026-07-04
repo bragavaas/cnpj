@@ -3,7 +3,7 @@ import gc
 import pathlib
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
-import bs4 as bs
+from sqlalchemy.engine import URL
 import ftplib
 import gzip
 import os
@@ -13,8 +13,9 @@ import re
 import sys
 import time
 import requests
+import urllib.parse
 import urllib.request
-import wget
+import xml.etree.ElementTree as ET
 import zipfile
 
 
@@ -26,7 +27,7 @@ def check_diff(url, file_name):
     if not os.path.isfile(file_name):
         return True # ainda nao foi baixado
 
-    response = requests.head(url)
+    response = requests.head(url, auth=RF_AUTH)
     new_size = int(response.headers.get('content-length', 0))
     old_size = os.path.getsize(file_name)
     if new_size != old_size:
@@ -72,7 +73,7 @@ def getEnv(env):
 
 current_path = pathlib.Path().resolve()
 dotenv_path = os.path.join(current_path, '.env')
-if not os.path.isfile(dotenv_path):
+if not os.path.isfile(dotenv_path) and sys.stdin.isatty():
     print('Especifique o local do seu arquivo de configuração ".env". Por exemplo: C:\...\Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ\code')
     # C:\Aphonso_C\Git\Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ\code
     local_env = input()
@@ -80,55 +81,98 @@ if not os.path.isfile(dotenv_path):
 print(dotenv_path)
 load_dotenv(dotenv_path=dotenv_path)
 
-dados_rf = 'http://200.152.38.155/CNPJ/'
+# Em ambientes não-interativos (ex: container Docker) não há como pedir o caminho do ".env" via
+# input(), então validamos aqui que as variáveis obrigatórias já vieram do ambiente (.env ou
+# "environment:" do docker-compose) e falhamos rápido com uma mensagem clara, em vez de seguir
+# com valores None que só explodiriam de forma confusa mais adiante.
+REQUIRED_ENV_VARS = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'OUTPUT_FILES_PATH', 'EXTRACTED_FILES_PATH']
+missing_env_vars = [var for var in REQUIRED_ENV_VARS if not getEnv(var)]
+if missing_env_vars:
+    sys.exit('Variáveis de ambiente faltando: ' + ', '.join(missing_env_vars) + '. Verifique seu arquivo ".env".')
+
+# A partir de jan/2026 a Receita Federal passou a hospedar os dados abertos de CNPJ num
+# compartilhamento público do Nextcloud (arquivos.receitafederal.gov.br), organizado em pastas
+# "AAAA-MM" (uma por mês de referência), acessível via WebDAV com o token do link como usuário
+# HTTP Basic e senha vazia. A raspagem de HTML antiga (Apache directory listing simples) não
+# existe mais nesse endereço. Token descoberto via a página oficial de dados abertos
+# (dados.gov.br/dados/conjuntos-dados/cadastro-nacional-da-pessoa-juridica---cnpj) e validado
+# manualmente; se a Receita Federal trocar o link de novo, sobrescreva via env var
+# ETL_RF_SHARE_TOKEN sem precisar mexer no código.
+RF_WEBDAV_BASE = 'https://arquivos.receitafederal.gov.br/public.php/webdav/'
+RF_SHARE_TOKEN = getEnv('ETL_RF_SHARE_TOKEN') or 'YggdBLfdninEJX9'
+RF_AUTH = (RF_SHARE_TOKEN, '')
 
 #%%
 # Read details from ".env" file:
-output_files = None
-extracted_files = None
-try:
-    output_files = getEnv('OUTPUT_FILES_PATH')
-    makedirs(output_files)
+output_files = getEnv('OUTPUT_FILES_PATH')
+makedirs(output_files)
 
-    extracted_files = getEnv('EXTRACTED_FILES_PATH')
-    makedirs(extracted_files)
+extracted_files = getEnv('EXTRACTED_FILES_PATH')
+makedirs(extracted_files)
 
-    print('Diretórios definidos: \n' +
-          'output_files: ' + str(output_files)  + '\n' +
-          'extracted_files: ' + str(extracted_files))
-except:
-    pass
-    print('Erro na definição dos diretórios, verifique o arquivo ".env" ou o local informado do seu arquivo de configuração.')
+print('Diretórios definidos: \n' +
+      'output_files: ' + str(output_files)  + '\n' +
+      'extracted_files: ' + str(extracted_files))
 
 #%%
-raw_html = urllib.request.urlopen(dados_rf)
-raw_html = raw_html.read()
+def webdav_list(path):
+    '''
+    Lista os nomes dos itens dentro de uma pasta do compartilhamento público WebDAV da Receita
+    Federal (sem incluir a própria pasta consultada).
+    '''
+    response = requests.request('PROPFIND', RF_WEBDAV_BASE + path, auth=RF_AUTH, headers={'Depth': '1'})
+    response.raise_for_status()
+    tree = ET.fromstring(response.content)
+    hrefs = [el.text for el in tree.findall('.//{DAV:}href') if el.text]
+    self_name = path.rstrip('/').rsplit('/', 1)[-1] if path else ''
+    names = [urllib.parse.unquote(href.rstrip('/').rsplit('/', 1)[-1]) for href in hrefs]
+    return [name for name in names if name and name != self_name]
 
-# Formatar página e converter em string
-page_items = bs.BeautifulSoup(raw_html, 'lxml')
-html_str = str(page_items)
+# Pastas de referência mensal disponíveis (formato "AAAA-MM") - pegamos sempre a mais recente.
+meses_disponiveis = sorted(m for m in webdav_list('') if re.fullmatch(r'\d{4}-\d{2}', m))
+if not meses_disponiveis:
+    sys.exit('Não foi possível encontrar nenhuma pasta de referência mensal no compartilhamento da Receita Federal.')
+mes_mais_recente = meses_disponiveis[-1]
+print('Mês de referência mais recente disponível na Receita Federal: ' + mes_mais_recente)
 
-# Obter arquivos
-Files = []
-text = '.zip'
-for m in re.finditer(text, html_str):
-    i_start = m.start()-40
-    i_end = m.end()
-    i_loc = html_str[i_start:i_end].find('href=')+6
-    Files.append(html_str[i_start+i_loc:i_end])
+dados_rf = RF_WEBDAV_BASE + mes_mais_recente + '/'
+Files = [f for f in webdav_list(mes_mais_recente + '/') if f.lower().endswith('.zip')]
 
-# Correcao do nome dos arquivos devido a mudanca na estrutura do HTML da pagina - 31/07/22 - Aphonso Rafael
-Files_clean = []
-for i in range(len(Files)):
-    if not Files[i].find('.zip">') > -1:
-        Files_clean.append(Files[i])
+#%%
+# Modo de teste: permite baixar/processar só uma fração dos arquivos e das linhas, para validar
+# o pipeline rapidamente (ex: rodando em Docker antes de disparar a carga completa, que leva
+# horas). Quando ETL_TEST_MODE não está setado, o comportamento é 100% o mesmo de sempre (carga
+# completa, sem limites).
+ETL_TEST_MODE = (getEnv('ETL_TEST_MODE') or '').lower() == 'true'
+ETL_MAX_FILES_PER_TYPE = int(getEnv('ETL_MAX_FILES_PER_TYPE') or 0) or None
+ETL_MAX_ROWS = int(getEnv('ETL_MAX_ROWS') or 0) or None
 
-try:
-    del Files
-except:
-    pass
+def limit_files_per_type(files, max_per_type):
+    '''
+    Mantém só os N primeiros arquivos de cada categoria "fracionada" (empresa/estabelecimento/
+    socios/simples, que vêm divididos em várias partes). As tabelas de referência (cnae, moti,
+    munic, natju, pais, quals) nunca são limitadas aqui: são pequenas e o resto do script espera
+    tê-las completas.
+    '''
+    if not max_per_type:
+        return files
+    fractioned_keywords = ['EMPRE', 'ESTABELE', 'SOCIO', 'SIMPLES']
+    counts = {kw: 0 for kw in fractioned_keywords}
+    limited = []
+    for f in files:
+        matched_keyword = next((kw for kw in fractioned_keywords if kw in f.upper()), None)
+        if matched_keyword is None:
+            limited.append(f)
+            continue
+        if counts[matched_keyword] < max_per_type:
+            limited.append(f)
+            counts[matched_keyword] += 1
+    return limited
 
-Files = Files_clean
+if ETL_TEST_MODE:
+    Files = limit_files_per_type(Files, ETL_MAX_FILES_PER_TYPE)
+    print('ETL_TEST_MODE ativo: limitado a ' + str(ETL_MAX_FILES_PER_TYPE) +
+          ' arquivo(s) por categoria e ' + str(ETL_MAX_ROWS) + ' linha(s) por arquivo.')
 
 print('Arquivos que serão baixados:')
 i_f = 0
@@ -140,12 +184,31 @@ for f in Files:
 ########################################################################################################################
 ## DOWNLOAD ############################################################################################################
 ########################################################################################################################
-# Create this bar_progress method which is invoked automatically from wget:
 def bar_progress(current, total, width=80):
   progress_message = "Downloading: %d%% [%d / %d] bytes - " % (current / total * 100, current, total)
   # Don't use print() as it will print in new line every time.
   sys.stdout.write("\r" + progress_message)
   sys.stdout.flush()
+
+def download_file(url, output_dir, auth=None):
+    '''
+    Baixa um arquivo autenticado (HTTP Basic) em streaming, salvando em output_dir com o mesmo
+    nome do final da URL. Substitui o antigo wget.download, que não suporta autenticação e não
+    funciona mais desde que a Receita Federal passou a exigir o token do compartilhamento.
+    '''
+    local_filename = os.path.join(output_dir, url.rstrip('/').rsplit('/', 1)[-1])
+    with requests.get(url, auth=auth, stream=True, timeout=60) as response:
+        response.raise_for_status()
+        total = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        with open(local_filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    bar_progress(downloaded, total)
+    sys.stdout.write('\n')
+    return local_filename
 
 #%%
 # Download arquivos ################################################################################################################################
@@ -158,14 +221,7 @@ for l in Files:
     url = dados_rf+l
     file_name = os.path.join(output_files, l)
     if check_diff(url, file_name):
-        wget.download(url, out=output_files, bar=bar_progress)
-
-#%%
-# Download layout:
-# FIXME está pedindo login gov.br
-# Layout = 'https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/cadastros/consultas/arquivos/NOVOLAYOUTDOSDADOSABERTOSDOCNPJ.pdf'
-# print('Baixando layout:')
-# wget.download(Layout, out=output_files, bar=bar_progress)
+        download_file(url, output_files, auth=RF_AUTH)
 
 ####################################################################################################################################################
 
@@ -237,8 +293,18 @@ port=getEnv('DB_PORT')
 database=getEnv('DB_NAME')
 
 # Conectar:
-engine = create_engine('postgresql://'+user+':'+passw+'@'+host+':'+port+'/'+database)
-conn = psycopg2.connect('dbname='+database+' '+'user='+user+' '+'host='+host+' '+'port='+port+' '+'password='+passw)
+# Usar URL.create / kwargs (em vez de concatenar strings) evita que senhas com caracteres
+# especiais (@, :, /, %, espaço) corrompam a connection string ou façam a conexão falhar
+# silenciosamente com credenciais erradas.
+engine = create_engine(URL.create(
+    'postgresql',
+    username=user,
+    password=passw,
+    host=host,
+    port=int(port),
+    database=database,
+))
+conn = psycopg2.connect(dbname=database, user=user, host=host, port=port, password=passw)
 cur = conn.cursor()
 
 # #%%
@@ -267,7 +333,7 @@ for e in range(0, len(arquivos_empresa)):
 
     empresa = pd.read_csv(filepath_or_buffer=extracted_file_path,
                           sep=';',
-                          #nrows=100,
+                          nrows=ETL_MAX_ROWS,
                           skiprows=0,
                           header=None,
                           dtype=empresa_dtypes,
@@ -329,7 +395,7 @@ for e in range(0, len(arquivos_estabelecimento)):
                               26: object, 27: object, 28: object, 29: 'Int32'}
     extracted_file_path = os.path.join(extracted_files, arquivos_estabelecimento[e])
 
-    NROWS = 2000000
+    NROWS = ETL_MAX_ROWS or 2000000
     part = 0
     while True:
         estabelecimento = pd.read_csv(filepath_or_buffer=extracted_file_path,
@@ -382,7 +448,7 @@ for e in range(0, len(arquivos_estabelecimento)):
         # estabelecimento
         to_sql(estabelecimento, name='estabelecimento', con=engine, if_exists='append', index=False)
         print('Arquivo ' + arquivos_estabelecimento[e] + ' / ' + str(part) + ' inserido com sucesso no banco de dados!')
-        if len(estabelecimento) == NROWS:
+        if len(estabelecimento) == NROWS and not ETL_TEST_MODE:
             part += 1
         else:
             break
@@ -421,7 +487,7 @@ for e in range(0, len(arquivos_socios)):
     extracted_file_path = os.path.join(extracted_files, arquivos_socios[e])
     socios = pd.read_csv(filepath_or_buffer=extracted_file_path,
                           sep=';',
-                          #nrows=100,
+                          nrows=ETL_MAX_ROWS,
                           skiprows=0,
                           header=None,
                           dtype=socios_dtypes,
@@ -484,13 +550,21 @@ for e in range(0, len(arquivos_simples)):
     simples_dtypes = ({0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: 'Int32'})
     extracted_file_path = os.path.join(extracted_files, arquivos_simples[e])
 
-    simples_lenght = sum(1 for line in open(extracted_file_path, "r"))
-    print('Linhas no arquivo do Simples '+ arquivos_simples[e] +': '+str(simples_lenght))
+    if ETL_TEST_MODE:
+        # Pula a contagem de linhas do arquivo inteiro (custa uma passada de I/O completa sobre
+        # um arquivo que pode ter GBs) e lê só até ETL_MAX_ROWS em uma única parte.
+        partes = 1
+        nrows = ETL_MAX_ROWS
+        skiprows = 0
+        print('ETL_TEST_MODE ativo: lendo até ' + str(ETL_MAX_ROWS) + ' linha(s), sem contar o arquivo inteiro.')
+    else:
+        simples_lenght = sum(1 for line in open(extracted_file_path, "r"))
+        print('Linhas no arquivo do Simples '+ arquivos_simples[e] +': '+str(simples_lenght))
 
-    tamanho_das_partes = 1000000 # Registros por carga
-    partes = round(simples_lenght / tamanho_das_partes)
-    nrows = tamanho_das_partes
-    skiprows = 0
+        tamanho_das_partes = 1000000 # Registros por carga
+        partes = round(simples_lenght / tamanho_das_partes)
+        nrows = tamanho_das_partes
+        skiprows = 0
 
     print('Este arquivo será dividido em ' + str(partes) + ' partes para inserção no banco de dados')
 

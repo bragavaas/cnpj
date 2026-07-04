@@ -1,0 +1,15 @@
+.git
+api/
+data/
+Outros/
+*.md
+*.png
+*.pdf
+*.pgerd
+LICENSE
+code/.env
+.env
+**/__pycache__/
+*.pyc
+.venv/
+venv/
