@@ -145,7 +145,10 @@ Files = [f for f in webdav_list(mes_mais_recente + '/') if f.lower().endswith('.
 # completa, sem limites).
 ETL_TEST_MODE = (getEnv('ETL_TEST_MODE') or '').lower() == 'true'
 ETL_MAX_FILES_PER_TYPE = int(getEnv('ETL_MAX_FILES_PER_TYPE') or 0) or None
-ETL_MAX_ROWS = int(getEnv('ETL_MAX_ROWS') or 0) or None
+# Só vale fora do modo de teste se ETL_TEST_MODE também estiver true - senão um ETL_MAX_ROWS
+# esquecido no ".env" de uma rodada de teste anterior faria a carga completa truncar empresa e
+# socios silenciosamente (o "nrows=" desses dois é aplicado direto, sem checar ETL_TEST_MODE).
+ETL_MAX_ROWS = (int(getEnv('ETL_MAX_ROWS') or 0) or None) if ETL_TEST_MODE else None
 
 def limit_files_per_type(files, max_per_type):
     '''
@@ -324,6 +327,7 @@ for e in range(0, len(arquivos_empresa)):
     print('Trabalhando no arquivo: '+arquivos_empresa[e]+' [...]')
     try:
         del empresa
+        gc.collect()
     except:
         pass
 
@@ -331,30 +335,41 @@ for e in range(0, len(arquivos_empresa)):
     empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
     extracted_file_path = os.path.join(extracted_files, arquivos_empresa[e])
 
-    empresa = pd.read_csv(filepath_or_buffer=extracted_file_path,
-                          sep=';',
-                          nrows=ETL_MAX_ROWS,
-                          skiprows=0,
-                          header=None,
-                          dtype=empresa_dtypes,
-                          encoding='latin-1',
-    )
+    # Lido em pedaços (mesmo padrão do bloco de estabelecimento): alguns arquivos de empresa
+    # trazem dezenas de milhões de linhas, e ler o arquivo inteiro de uma vez em um DataFrame só
+    # já derrubou o processo por estouro de memória numa carga completa anterior.
+    NROWS = ETL_MAX_ROWS or 2000000
+    part = 0
+    while True:
+        empresa = pd.read_csv(filepath_or_buffer=extracted_file_path,
+                              sep=';',
+                              nrows=NROWS,
+                              skiprows=NROWS * part,
+                              header=None,
+                              dtype=empresa_dtypes,
+                              encoding='latin-1',
+        )
 
-    # Tratamento do arquivo antes de inserir na base:
-    empresa = empresa.reset_index()
-    del empresa['index']
+        # Tratamento do arquivo antes de inserir na base:
+        empresa = empresa.reset_index()
+        del empresa['index']
+        gc.collect()
 
-    # Renomear colunas
-    empresa.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
+        # Renomear colunas
+        empresa.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
 
-    # Replace "," por "."
-    empresa['capital_social'] = empresa['capital_social'].apply(lambda x: x.replace(',','.'))
-    empresa['capital_social'] = empresa['capital_social'].astype(float)
+        # Replace "," por "."
+        empresa['capital_social'] = empresa['capital_social'].apply(lambda x: x.replace(',','.'))
+        empresa['capital_social'] = empresa['capital_social'].astype(float)
 
-    # Gravar dados no banco:
-    # Empresa
-    to_sql(empresa, name='empresa', con=engine, if_exists='append', index=False)
-    print('Arquivo ' + arquivos_empresa[e] + ' inserido com sucesso no banco de dados!')
+        # Gravar dados no banco:
+        # Empresa
+        to_sql(empresa, name='empresa', con=engine, if_exists='append', index=False)
+        print('Arquivo ' + arquivos_empresa[e] + ' / ' + str(part) + ' inserido com sucesso no banco de dados!')
+        if len(empresa) == NROWS and not ETL_TEST_MODE:
+            part += 1
+        else:
+            break
 
 try:
     del empresa
@@ -479,42 +494,54 @@ for e in range(0, len(arquivos_socios)):
     print('Trabalhando no arquivo: '+arquivos_socios[e]+' [...]')
     try:
         del socios
+        gc.collect()
     except:
         pass
 
     socios_dtypes = {0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32', 5: 'Int32', 6: 'Int32',
                      7: object, 8: object, 9: 'Int32', 10: 'Int32'}
     extracted_file_path = os.path.join(extracted_files, arquivos_socios[e])
-    socios = pd.read_csv(filepath_or_buffer=extracted_file_path,
-                          sep=';',
-                          nrows=ETL_MAX_ROWS,
-                          skiprows=0,
-                          header=None,
-                          dtype=socios_dtypes,
-                          encoding='latin-1',
-    )
 
-    # Tratamento do arquivo antes de inserir na base:
-    socios = socios.reset_index()
-    del socios['index']
+    # Mesmo motivo do bloco de empresa: lido em pedaços para não estourar memória em arquivos
+    # grandes.
+    NROWS = ETL_MAX_ROWS or 2000000
+    part = 0
+    while True:
+        socios = pd.read_csv(filepath_or_buffer=extracted_file_path,
+                              sep=';',
+                              nrows=NROWS,
+                              skiprows=NROWS * part,
+                              header=None,
+                              dtype=socios_dtypes,
+                              encoding='latin-1',
+        )
 
-    # Renomear colunas
-    socios.columns = ['cnpj_basico',
-                      'identificador_socio',
-                      'nome_socio_razao_social',
-                      'cpf_cnpj_socio',
-                      'qualificacao_socio',
-                      'data_entrada_sociedade',
-                      'pais',
-                      'representante_legal',
-                      'nome_do_representante',
-                      'qualificacao_representante_legal',
-                      'faixa_etaria']
+        # Tratamento do arquivo antes de inserir na base:
+        socios = socios.reset_index()
+        del socios['index']
+        gc.collect()
 
-    # Gravar dados no banco:
-    # socios
-    to_sql(socios, name='socios', con=engine, if_exists='append', index=False)
-    print('Arquivo ' + arquivos_socios[e] + ' inserido com sucesso no banco de dados!')
+        # Renomear colunas
+        socios.columns = ['cnpj_basico',
+                          'identificador_socio',
+                          'nome_socio_razao_social',
+                          'cpf_cnpj_socio',
+                          'qualificacao_socio',
+                          'data_entrada_sociedade',
+                          'pais',
+                          'representante_legal',
+                          'nome_do_representante',
+                          'qualificacao_representante_legal',
+                          'faixa_etaria']
+
+        # Gravar dados no banco:
+        # socios
+        to_sql(socios, name='socios', con=engine, if_exists='append', index=False)
+        print('Arquivo ' + arquivos_socios[e] + ' / ' + str(part) + ' inserido com sucesso no banco de dados!')
+        if len(socios) == NROWS and not ETL_TEST_MODE:
+            part += 1
+        else:
+            break
 
 try:
     del socios
@@ -923,6 +950,14 @@ create index if not exists socios_cnpj on socios(cnpj_basico);
 commit;
 create index if not exists simples_cnpj on simples(cnpj_basico);
 commit;
+create index if not exists estabelecimento_uf on estabelecimento(uf);
+commit;
+create index if not exists estabelecimento_municipio on estabelecimento(municipio);
+commit;
+create index if not exists estabelecimento_situacao_cadastral on estabelecimento(situacao_cadastral);
+commit;
+create index if not exists estabelecimento_cnae_fiscal_principal on estabelecimento(cnae_fiscal_principal);
+commit;
 """)
 conn.commit()
 print("""
@@ -932,6 +967,13 @@ print("""
    - estabelecimento
    - socios
    - simples
+
+## Índices criados em `estabelecimento`, para os filtros da API
+## de busca (`/empresas/search`):
+   - uf
+   - municipio
+   - situacao_cadastral
+   - cnae_fiscal_principal
 ############################################################
 """)
 index_end = time.time()
