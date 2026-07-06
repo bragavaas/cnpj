@@ -5,6 +5,17 @@ import { Database } from '../database/database.types';
 
 type LookupTableName = 'cnae' | 'moti' | 'munic' | 'natju' | 'pais' | 'quals';
 
+/** Maiúsculas e sem acento, para comparar nome de município digitado pelo usuário com a
+ * descrição da tabela `munic` independente de acentuação/caixa. */
+const COMBINING_DIACRITICS = new RegExp('[\\u0300-\\u036f]', 'g');
+function normalizeNome(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(COMBINING_DIACRITICS, '')
+    .trim()
+    .toUpperCase();
+}
+
 /**
  * Carrega as 6 tabelas de referência (pequenas) inteiras em memória e resolve descrições em
  * código, normalizando o código para string dos dois lados. Isso evita ter que fazer JOIN no
@@ -23,6 +34,9 @@ export class LookupsService implements OnModuleInit {
     pais: new Map(),
     quals: new Map(),
   };
+  /** nome de município normalizado -> código(s) - lista porque nomes de município se repetem
+   * entre estados diferentes (ex: "Bom Jesus" existe em 5 UFs na tabela `munic`). */
+  private municipioPorNome = new Map<string, number[]>();
 
   constructor(@Inject(KYSELY_CONNECTION) private readonly db: Kysely<Database>) {}
 
@@ -43,6 +57,17 @@ export class LookupsService implements OnModuleInit {
       }
       this.maps[table] = map;
     });
+
+    const municipioPorNome = new Map<string, number[]>();
+    for (const [codigo, descricao] of this.maps.munic.entries()) {
+      const normalizado = normalizeNome(descricao);
+      if (!normalizado) continue;
+      const codigos = municipioPorNome.get(normalizado) ?? [];
+      codigos.push(Number(codigo));
+      municipioPorNome.set(normalizado, codigos);
+    }
+    this.municipioPorNome = municipioPorNome;
+
     this.logger.log(
       'Lookups carregados: ' +
         tables.map((table) => `${table}=${this.maps[table].size}`).join(', '),
@@ -64,6 +89,13 @@ export class LookupsService implements OnModuleInit {
 
   resolveMunicipio(codigo: string | number | null | undefined) {
     return this.resolve('munic', codigo);
+  }
+
+  /** Traduz um nome de município (ex: "Rio de Janeiro") para o(s) código(s) da tabela `munic`.
+   * Retorna uma lista vazia se não encontrar, e pode retornar mais de um código quando o nome é
+   * ambíguo entre estados. */
+  findMunicipioCodigosPorNome(nome: string): number[] {
+    return this.municipioPorNome.get(normalizeNome(nome)) ?? [];
   }
 
   resolveNaturezaJuridica(codigo: string | number | null | undefined) {
