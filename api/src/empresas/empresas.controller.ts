@@ -53,7 +53,7 @@ export class EmpresasController {
     description: 'Código do CNAE fiscal principal, com ou sem formatação (ex: "8630501" ou "8630-5/01")',
   })
   @ApiQuery({ name: 'page', required: false, description: 'Padrão 1' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Padrão 20, máximo 100' })
+  @ApiQuery({ name: 'limit', required: false, description: 'Padrão 20, máximo 20' })
   @ApiResponse({ status: 200, description: 'Lista paginada de resultados (pode vir vazia)' })
   @ApiResponse({
     status: 400,

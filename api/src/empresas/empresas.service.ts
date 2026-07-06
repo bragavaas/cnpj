@@ -24,7 +24,7 @@ export class EmpresasService {
 
   async search(params: EmpresasSearchParams) {
     const page = Math.max(1, params.page ?? 1);
-    const limit = Math.min(100, Math.max(1, params.limit ?? 20));
+    const limit = Math.min(20, Math.max(1, params.limit ?? 20));
     const offset = (page - 1) * limit;
 
     const query = this.db

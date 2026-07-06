@@ -11,6 +11,10 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Docker's default 64MB /dev/shm is too small for Postgres parallel query workers against
+    # tables this size (estabelecimento ~72M rows) - broad/unfiltered searches were hitting
+    # "could not resize shared memory segment [...] No space left on device" (500s from the API).
+    shm_size: '256mb'
     environment:
       POSTGRES_DB: ${DB_NAME:-dados_rfb}
       POSTGRES_USER: ${DB_USER:-postgres}

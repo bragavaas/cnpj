@@ -96,12 +96,12 @@ opcionais e combináveis (AND); sem nenhum filtro, lista tudo em ordem alfabéti
 | `situacao` | número | `1`=Nula `2`=Ativa `3`=Suspensa `4`=Inapta `8`=Baixada |
 | `cnae` | número | CNAE fiscal principal, com ou sem formatação (`8630501` ou `8630-5/01`) — **um único código por chamada**, não há busca por categoria/faixa |
 | `page` | número | Padrão `1` |
-| `limit` | número | Padrão `20`, máximo `100` |
+| `limit` | número | Padrão `20`, máximo `20` (valores maiores são reduzidos a `20`, sem erro) |
 
 ```
 curl "http://localhost:3000/empresas/search?razao_social=exemplo&uf=RJ&limit=10"
 curl "http://localhost:3000/empresas/search?municipio=Rio%20de%20Janeiro&cnae=8630503"
-curl "http://localhost:3000/empresas/search?municipio=6001&situacao=2&cnae=8610101&limit=100"
+curl "http://localhost:3000/empresas/search?municipio=6001&situacao=2&cnae=8610101&limit=20"
 ```
 
 **Resposta 200:**
