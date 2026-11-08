@@ -94,6 +94,7 @@ ETL_SKIP_SOCIOS=true
 - Com filtro ativo, o bloco de estabelecimentos roda antes do de empresas, e `empresa` e `simples` recebem só os
   `cnpj_basico` dos estabelecimentos que passaram. As tabelas de referência continuam completas.
 - `ETL_SKIP_SOCIOS=true` pula a tabela de sócios. O arquivo de sócios ainda é baixado e extraído.
+- `ETL_DOWNLOAD_RETRIES` (padrão 8): quantas vezes o download de cada arquivo é retomado quando a conexão com a Receita cai. O progresso fica em um arquivo `.part` e continua de onde parou.
 - Para gravar num Postgres remoto (por exemplo, Supabase), basta apontar `DB_HOST`, `DB_PORT`, `DB_USER`,
   `DB_PASSWORD` e `DB_NAME` para ele; o container `db` do compose fica sem uso.
 

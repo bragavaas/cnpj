@@ -74,7 +74,7 @@ def getEnv(env):
 current_path = pathlib.Path().resolve()
 dotenv_path = os.path.join(current_path, '.env')
 if not os.path.isfile(dotenv_path) and sys.stdin.isatty():
-    print('Especifique o local do seu arquivo de configuração ".env". Por exemplo: C:\...\Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ\code')
+    print(r'Especifique o local do seu arquivo de configuração ".env". Por exemplo: C:\...\Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ\code')
     # C:\Aphonso_C\Git\Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ\code
     local_env = input()
     dotenv_path = os.path.join(local_env, '.env')
@@ -232,23 +232,51 @@ def bar_progress(current, total, width=80):
   sys.stdout.write("\r" + progress_message)
   sys.stdout.flush()
 
+DOWNLOAD_RETRIES = int(os.getenv('ETL_DOWNLOAD_RETRIES', '8'))
+
 def download_file(url, output_dir, auth=None):
     '''
     Baixa um arquivo autenticado (HTTP Basic) em streaming, salvando em output_dir com o mesmo
     nome do final da URL. Substitui o antigo wget.download, que não suporta autenticação e não
     funciona mais desde que a Receita Federal passou a exigir o token do compartilhamento.
+
+    A conexão com a Receita cai com frequência no meio de arquivos grandes. Por isso o download
+    grava num arquivo ".part", retoma de onde parou (cabeçalho Range) e tenta de novo até
+    ETL_DOWNLOAD_RETRIES vezes antes de desistir.
     '''
     local_filename = os.path.join(output_dir, url.rstrip('/').rsplit('/', 1)[-1])
-    with requests.get(url, auth=auth, stream=True, timeout=60) as response:
-        response.raise_for_status()
-        total = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        with open(local_filename, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    bar_progress(downloaded, total)
+    part_filename = local_filename + '.part'
+    attempt = 0
+    while True:
+        attempt += 1
+        downloaded = os.path.getsize(part_filename) if os.path.isfile(part_filename) else 0
+        headers = {'Range': 'bytes=%d-' % downloaded} if downloaded else {}
+        try:
+            with requests.get(url, auth=auth, stream=True, timeout=60, headers=headers) as response:
+                if downloaded and response.status_code != 206:
+                    # servidor não aceitou retomar: recomeça do zero
+                    downloaded = 0
+                    mode = 'wb'
+                else:
+                    mode = 'ab' if downloaded else 'wb'
+                response.raise_for_status()
+                total = int(response.headers.get('content-length', 0)) + downloaded
+                with open(part_filename, mode) as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            bar_progress(downloaded, total)
+            break
+        except (requests.exceptions.RequestException, OSError) as e:
+            sys.stdout.write('\n')
+            if attempt >= DOWNLOAD_RETRIES:
+                raise
+            wait = min(60, 5 * attempt)
+            print('Download interrompido (%s). Tentativa %d de %d em %ds, retomando de %d bytes.'
+                  % (type(e).__name__, attempt + 1, DOWNLOAD_RETRIES, wait, downloaded))
+            time.sleep(wait)
+    os.replace(part_filename, local_filename)
     sys.stdout.write('\n')
     return local_filename
 
