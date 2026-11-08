@@ -75,6 +75,28 @@ Python/Postgres na máquina.
    ```
    A API sobe em `http://localhost:3000` (Swagger em `http://localhost:3000/docs`).
 
+
+### Carga parcial (UF, município, lista de CNAEs)
+
+Para carregar só um recorte (por exemplo, um município e uma lista de atividades), defina no `.env`:
+
+```
+ETL_FILTER_UF=RJ
+ETL_FILTER_MUNICIPIO=6001
+ETL_FILTER_CNAE_FILE=/data/cnae-icp-ab.csv
+ETL_SKIP_SOCIOS=true
+```
+
+- `ETL_FILTER_MUNICIPIO` usa o código de município da Receita Federal (tabela `munic`, não o do IBGE). Confira o
+  código no arquivo `*.MUNICCSV` extraído antes de rodar (`findstr "RIO DE JANEIRO" data\extracted\*.MUNICCSV`).
+- `ETL_FILTER_CNAE_FILE` é um CSV com a coluna `codigo` (7 dígitos, com ou sem formatação). O filtro é pela
+  atividade principal; as secundárias continuam gravadas para consulta.
+- Com filtro ativo, o bloco de estabelecimentos roda antes do de empresas, e `empresa` e `simples` recebem só os
+  `cnpj_basico` dos estabelecimentos que passaram. As tabelas de referência continuam completas.
+- `ETL_SKIP_SOCIOS=true` pula a tabela de sócios. O arquivo de sócios ainda é baixado e extraído.
+- Para gravar num Postgres remoto (por exemplo, Supabase), basta apontar `DB_HOST`, `DB_PORT`, `DB_USER`,
+  `DB_PASSWORD` e `DB_NAME` para ele; o container `db` do compose fica sem uso.
+
 ### API HTTP (NestJS) para consultar os dados
 
 O diretório `api/` tem uma API REST somente-leitura em NestJS por cima do banco, pensada para ser

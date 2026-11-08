@@ -150,6 +150,45 @@ ETL_MAX_FILES_PER_TYPE = int(getEnv('ETL_MAX_FILES_PER_TYPE') or 0) or None
 # socios silenciosamente (o "nrows=" desses dois é aplicado direto, sem checar ETL_TEST_MODE).
 ETL_MAX_ROWS = (int(getEnv('ETL_MAX_ROWS') or 0) or None) if ETL_TEST_MODE else None
 
+# Filtro de carga parcial (opcional). Quando ETL_FILTER_UF, ETL_FILTER_MUNICIPIO ou ETL_FILTER_CNAE_FILE
+# estão definidos, só os estabelecimentos que passam no filtro entram no banco, e as tabelas empresa e
+# simples recebem só os cnpj_basico desses estabelecimentos. As tabelas de referência (cnae, munic, natju,
+# moti, pais, quals) continuam completas. Sem nenhuma dessas variáveis, o comportamento é o de sempre.
+#   ETL_FILTER_UF            ex.: RJ (uma UF; comparação exata com a coluna uf)
+#   ETL_FILTER_MUNICIPIO     ex.: 6001 (código de município da Receita, tabela munic; lista separada por vírgula)
+#   ETL_FILTER_CNAE_FILE     caminho de um CSV com a coluna "codigo" (7 dígitos, com ou sem formatação);
+#                            filtra pela atividade principal (cnae_fiscal_principal)
+#   ETL_SKIP_SOCIOS          true para não carregar a tabela de sócios (dados pessoais que nem todo uso precisa)
+ETL_FILTER_UF = (getEnv('ETL_FILTER_UF') or '').strip().upper() or None
+ETL_FILTER_MUNICIPIO = set(m.strip() for m in (getEnv('ETL_FILTER_MUNICIPIO') or '').split(',') if m.strip()) or None
+ETL_FILTER_CNAE_FILE = getEnv('ETL_FILTER_CNAE_FILE') or None
+ETL_SKIP_SOCIOS = (getEnv('ETL_SKIP_SOCIOS') or '').lower() == 'true'
+ETL_FILTER_CNAES = None
+if ETL_FILTER_CNAE_FILE:
+    _cnae_df = pd.read_csv(ETL_FILTER_CNAE_FILE, dtype=str)
+    _col = 'codigo' if 'codigo' in _cnae_df.columns else _cnae_df.columns[0]
+    ETL_FILTER_CNAES = set(re.sub(r'\D', '', str(c)).zfill(7) for c in _cnae_df[_col].dropna())
+    print('Filtro de CNAE: ' + str(len(ETL_FILTER_CNAES)) + ' códigos lidos de ' + ETL_FILTER_CNAE_FILE)
+FILTRO_ATIVO = bool(ETL_FILTER_UF or ETL_FILTER_MUNICIPIO or ETL_FILTER_CNAES)
+if FILTRO_ATIVO:
+    print('Carga parcial ativa: uf=' + str(ETL_FILTER_UF) + ' municipio=' + str(ETL_FILTER_MUNICIPIO) +
+          ' cnaes=' + (str(len(ETL_FILTER_CNAES)) if ETL_FILTER_CNAES else 'todos'))
+# cnpj_basico dos estabelecimentos que passaram no filtro; preenchido no bloco de estabelecimento e usado
+# para filtrar empresa e simples. Por isso o bloco de estabelecimento roda antes do de empresa.
+cnpj_basico_filtrados = set()
+
+def filtrar_estabelecimento(df):
+    if not FILTRO_ATIVO:
+        return df
+    mask = pd.Series(True, index=df.index)
+    if ETL_FILTER_UF:
+        mask &= df['uf'].astype(str).str.upper() == ETL_FILTER_UF
+    if ETL_FILTER_MUNICIPIO:
+        mask &= df['municipio'].astype(str).isin(ETL_FILTER_MUNICIPIO)
+    if ETL_FILTER_CNAES:
+        mask &= df['cnae_fiscal_principal'].astype(str).str.replace(r'\D', '', regex=True).str.zfill(7).isin(ETL_FILTER_CNAES)
+    return df[mask]
+
 def limit_files_per_type(files, max_per_type):
     '''
     Mantém só os N primeiros arquivos de cada categoria "fracionada" (empresa/estabelecimento/
@@ -310,76 +349,6 @@ engine = create_engine(URL.create(
 conn = psycopg2.connect(dbname=database, user=user, host=host, port=port, password=passw)
 cur = conn.cursor()
 
-# #%%
-# # Arquivos de empresa:
-empresa_insert_start = time.time()
-print("""
-#######################
-## Arquivos de EMPRESA:
-#######################
-""")
-
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "empresa";')
-conn.commit()
-
-for e in range(0, len(arquivos_empresa)):
-    print('Trabalhando no arquivo: '+arquivos_empresa[e]+' [...]')
-    try:
-        del empresa
-        gc.collect()
-    except:
-        pass
-
-    #empresa = pd.DataFrame(columns=[0, 1, 2, 3, 4, 5, 6])
-    empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
-    extracted_file_path = os.path.join(extracted_files, arquivos_empresa[e])
-
-    # Lido em pedaços (mesmo padrão do bloco de estabelecimento): alguns arquivos de empresa
-    # trazem dezenas de milhões de linhas, e ler o arquivo inteiro de uma vez em um DataFrame só
-    # já derrubou o processo por estouro de memória numa carga completa anterior.
-    NROWS = ETL_MAX_ROWS or 2000000
-    part = 0
-    while True:
-        empresa = pd.read_csv(filepath_or_buffer=extracted_file_path,
-                              sep=';',
-                              nrows=NROWS,
-                              skiprows=NROWS * part,
-                              header=None,
-                              dtype=empresa_dtypes,
-                              encoding='latin-1',
-        )
-
-        # Tratamento do arquivo antes de inserir na base:
-        empresa = empresa.reset_index()
-        del empresa['index']
-        gc.collect()
-
-        # Renomear colunas
-        empresa.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
-
-        # Replace "," por "."
-        empresa['capital_social'] = empresa['capital_social'].apply(lambda x: x.replace(',','.'))
-        empresa['capital_social'] = empresa['capital_social'].astype(float)
-
-        # Gravar dados no banco:
-        # Empresa
-        to_sql(empresa, name='empresa', con=engine, if_exists='append', index=False)
-        print('Arquivo ' + arquivos_empresa[e] + ' / ' + str(part) + ' inserido com sucesso no banco de dados!')
-        if len(empresa) == NROWS and not ETL_TEST_MODE:
-            part += 1
-        else:
-            break
-
-try:
-    del empresa
-except:
-    pass
-print('Arquivos de empresa finalizados!')
-empresa_insert_end = time.time()
-empresa_Tempo_insert = round((empresa_insert_end - empresa_insert_start))
-print('Tempo de execução do processo de empresa (em segundos): ' + str(empresa_Tempo_insert))
-
 #%%
 # Arquivos de estabelecimento:
 estabelecimento_insert_start = time.time()
@@ -422,6 +391,7 @@ for e in range(0, len(arquivos_estabelecimento)):
                               encoding='latin-1',
         )
 
+        linhas_lidas = len(estabelecimento)
         # Tratamento do arquivo antes de inserir na base:
         estabelecimento = estabelecimento.reset_index()
         del estabelecimento['index']
@@ -459,11 +429,16 @@ for e in range(0, len(arquivos_estabelecimento)):
                                    'situacao_especial',
                                    'data_situacao_especial']
 
+        # Carga parcial: fica só o que passa no filtro; guarda os cnpj_basico para empresa e simples
+        estabelecimento = filtrar_estabelecimento(estabelecimento)
+        if FILTRO_ATIVO:
+            cnpj_basico_filtrados.update(estabelecimento['cnpj_basico'].astype(str).tolist())
+            print('Linhas após o filtro: ' + str(len(estabelecimento)) + ' (acumulado de cnpj_basico: ' + str(len(cnpj_basico_filtrados)) + ')')
         # Gravar dados no banco:
         # estabelecimento
         to_sql(estabelecimento, name='estabelecimento', con=engine, if_exists='append', index=False)
         print('Arquivo ' + arquivos_estabelecimento[e] + ' / ' + str(part) + ' inserido com sucesso no banco de dados!')
-        if len(estabelecimento) == NROWS and not ETL_TEST_MODE:
+        if linhas_lidas == NROWS and not ETL_TEST_MODE:
             part += 1
         else:
             break
@@ -476,6 +451,79 @@ print('Arquivos de estabelecimento finalizados!')
 estabelecimento_insert_end = time.time()
 estabelecimento_Tempo_insert = round((estabelecimento_insert_end - estabelecimento_insert_start))
 print('Tempo de execução do processo de estabelecimento (em segundos): ' + str(estabelecimento_Tempo_insert))
+
+# #%%
+# # Arquivos de empresa:
+empresa_insert_start = time.time()
+print("""
+#######################
+## Arquivos de EMPRESA:
+#######################
+""")
+
+# Drop table antes do insert
+cur.execute('DROP TABLE IF EXISTS "empresa";')
+conn.commit()
+
+for e in range(0, len(arquivos_empresa)):
+    print('Trabalhando no arquivo: '+arquivos_empresa[e]+' [...]')
+    try:
+        del empresa
+        gc.collect()
+    except:
+        pass
+
+    #empresa = pd.DataFrame(columns=[0, 1, 2, 3, 4, 5, 6])
+    empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
+    extracted_file_path = os.path.join(extracted_files, arquivos_empresa[e])
+
+    # Lido em pedaços (mesmo padrão do bloco de estabelecimento): alguns arquivos de empresa
+    # trazem dezenas de milhões de linhas, e ler o arquivo inteiro de uma vez em um DataFrame só
+    # já derrubou o processo por estouro de memória numa carga completa anterior.
+    NROWS = ETL_MAX_ROWS or 2000000
+    part = 0
+    while True:
+        empresa = pd.read_csv(filepath_or_buffer=extracted_file_path,
+                              sep=';',
+                              nrows=NROWS,
+                              skiprows=NROWS * part,
+                              header=None,
+                              dtype=empresa_dtypes,
+                              encoding='latin-1',
+        )
+
+        linhas_lidas = len(empresa)
+        # Tratamento do arquivo antes de inserir na base:
+        empresa = empresa.reset_index()
+        del empresa['index']
+        gc.collect()
+
+        # Renomear colunas
+        empresa.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
+
+        # Replace "," por "."
+        empresa['capital_social'] = empresa['capital_social'].apply(lambda x: x.replace(',','.'))
+        empresa['capital_social'] = empresa['capital_social'].astype(float)
+
+        if FILTRO_ATIVO:
+            empresa = empresa[empresa['cnpj_basico'].astype(str).isin(cnpj_basico_filtrados)]
+        # Gravar dados no banco:
+        # Empresa
+        to_sql(empresa, name='empresa', con=engine, if_exists='append', index=False)
+        print('Arquivo ' + arquivos_empresa[e] + ' / ' + str(part) + ' inserido com sucesso no banco de dados!')
+        if linhas_lidas == NROWS and not ETL_TEST_MODE:
+            part += 1
+        else:
+            break
+
+try:
+    del empresa
+except:
+    pass
+print('Arquivos de empresa finalizados!')
+empresa_insert_end = time.time()
+empresa_Tempo_insert = round((empresa_insert_end - empresa_insert_start))
+print('Tempo de execução do processo de empresa (em segundos): ' + str(empresa_Tempo_insert))
 
 #%%
 # Arquivos de socios:
@@ -490,6 +538,9 @@ print("""
 cur.execute('DROP TABLE IF EXISTS "socios";')
 conn.commit()
 
+if ETL_SKIP_SOCIOS:
+    print('ETL_SKIP_SOCIOS ativo: tabela de sócios não será carregada.')
+    arquivos_socios = []
 for e in range(0, len(arquivos_socios)):
     print('Trabalhando no arquivo: '+arquivos_socios[e]+' [...]')
     try:
@@ -623,6 +674,8 @@ for e in range(0, len(arquivos_simples)):
 
         skiprows = skiprows+nrows
 
+        if FILTRO_ATIVO:
+            simples = simples[simples['cnpj_basico'].astype(str).isin(cnpj_basico_filtrados)]
         # Gravar dados no banco:
         # simples
         to_sql(simples, name='simples', con=engine, if_exists='append', index=False)
