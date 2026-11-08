@@ -367,7 +367,7 @@ database=getEnv('DB_NAME')
 # especiais (@, :, /, %, espaço) corrompam a connection string ou façam a conexão falhar
 # silenciosamente com credenciais erradas.
 engine = create_engine(URL.create(
-    'postgresql',
+    'postgresql+psycopg2',
     username=user,
     password=passw,
     host=host,
