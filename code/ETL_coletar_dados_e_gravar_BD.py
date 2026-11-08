@@ -1022,24 +1022,25 @@ print("""
 ## Criar índices na base de dados [...]
 #######################################
 """)
-cur.execute("""
-create index if not exists empresa_cnpj on empresa(cnpj_basico);
-commit;
-create index if not exists estabelecimento_cnpj on estabelecimento(cnpj_basico);
-commit;
-create index if not exists socios_cnpj on socios(cnpj_basico);
-commit;
-create index if not exists simples_cnpj on simples(cnpj_basico);
-commit;
-create index if not exists estabelecimento_uf on estabelecimento(uf);
-commit;
-create index if not exists estabelecimento_municipio on estabelecimento(municipio);
-commit;
-create index if not exists estabelecimento_situacao_cadastral on estabelecimento(situacao_cadastral);
-commit;
-create index if not exists estabelecimento_cnae_fiscal_principal on estabelecimento(cnae_fiscal_principal);
-commit;
-""")
+INDICES = [
+    ('empresa', 'empresa_cnpj', 'cnpj_basico'),
+    ('estabelecimento', 'estabelecimento_cnpj', 'cnpj_basico'),
+    ('socios', 'socios_cnpj', 'cnpj_basico'),
+    ('simples', 'simples_cnpj', 'cnpj_basico'),
+    ('estabelecimento', 'estabelecimento_uf', 'uf'),
+    ('estabelecimento', 'estabelecimento_municipio', 'municipio'),
+    ('estabelecimento', 'estabelecimento_situacao_cadastral', 'situacao_cadastral'),
+    ('estabelecimento', 'estabelecimento_cnae_fiscal_principal', 'cnae_fiscal_principal'),
+]
+for tabela, indice, coluna in INDICES:
+    # Numa carga parcial (ETL_SKIP_SOCIOS, ou filtro que não deixou nenhuma linha) a tabela
+    # pode não existir; nesse caso o índice é pulado em vez de derrubar o processo.
+    cur.execute("select to_regclass(%s)", (tabela,))
+    if cur.fetchone()[0] is None:
+        print(f'Tabela {tabela} não existe nesta carga; índice {indice} não criado.')
+        continue
+    cur.execute(f'create index if not exists {indice} on {tabela}({coluna});')
+    conn.commit()
 conn.commit()
 print("""
 ############################################################
